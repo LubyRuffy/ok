@@ -1,0 +1,5 @@
+proxy_server: https://127.0.0.1:7890
+proxy_domains:
+  - "*.baidu.com"
+proxy_apps:
+  - "curl.exe"
