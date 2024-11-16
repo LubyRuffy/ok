@@ -66,7 +66,8 @@ func (c *Config) ContainsDomain(responseDomain string) bool {
 
 // DNSCache DNS缓存结构
 type DNSCache struct {
-	cache sync.Map
+	cache     sync.Map
+	fullCache sync.Map
 }
 
 // Connection 表示一个TCP连接
@@ -115,6 +116,21 @@ func (dc *DNSCache) Get(ip string) (string, bool) {
 func (dc *DNSCache) Has(ip string) bool {
 	_, ok := dc.cache.Load(ip)
 	return ok
+}
+
+// 如果找到就替换，如果没有就用输入的返回
+func (dc *DNSCache) matchHost(ip string) string {
+	if v, ok := dc.fullCache.Load(ip); ok {
+		return v.(string)
+	}
+	if v, ok := dc.Get(ip); ok {
+		return v
+	}
+	return ip
+}
+
+func (dc *DNSCache) Add(ip string, domain string) {
+	dc.fullCache.Store(ip, domain)
 }
 
 func NewConnectionManager() *ConnectionManager {
@@ -238,7 +254,9 @@ func (ps *ProxyServer) Start() error {
 		if len(diff(ports, lastPorts)) > 0 {
 			log.Println("+++++++++++")
 			connMap.Range(func(key, value any) bool {
-				log.Println(key, filepath.Base(value.(*Connection).ProcessName), value.(*Connection).SourceAddr)
+				log.Println(key,
+					filepath.Base(value.(*Connection).ProcessName),
+					ps.dnsCache.matchHost(value.(*Connection).SourceAddr))
 				return true
 			})
 			log.Println("-----------")
@@ -314,7 +332,6 @@ func (ps *ProxyServer) handleDns(packet []byte) {
 			case dns.TypeA:
 				// 目前只处理ipv4
 				responseDomain := strings.TrimSuffix(a.(*dns.A).Hdr.Name, ".")
-
 				if rawHost != "" || ps.config.ContainsDomain(responseDomain) {
 					if rawHost == "" {
 						rawHost = responseDomain
@@ -323,6 +340,11 @@ func (ps *ProxyServer) handleDns(packet []byte) {
 					log.Println("hijack dns for", rawHost)
 					continue
 				}
+
+				if rawHost == "" {
+					rawHost = responseDomain
+				}
+				ps.dnsCache.Add(a.(*dns.A).A.String(), rawHost)
 			case dns.TypeAAAA:
 				// 暂时不处理ipv6
 			}
@@ -406,7 +428,7 @@ func (ps *ProxyServer) handlePacket(packet []byte, addr *divert.Address, channel
 
 	if ps.shouldProxy(ipv4.DestinationAddress().String(), procName) {
 		if tcpHdr.Flags().Contains(header.TCPFlagSyn) { // SYN flag
-			log.Println("->", srcPort, ipv4.DestinationAddress().String(), tcpHdr.DestinationPort())
+			log.Println("->", srcPort, ps.dnsCache.matchHost(ipv4.DestinationAddress().String()), tcpHdr.DestinationPort())
 			ps.connMgr.AddConnection(pInfo.(*Connection))
 		}
 		// 启动代理连接
@@ -506,6 +528,36 @@ func (ps *ProxyServer) connectToProxy() (net.Conn, error) {
 		}
 		httpsProxyHostInfo := fmt.Sprintf("%v:%v", u.Hostname(), port)
 		return tls.Dial("tcp", httpsProxyHostInfo, &tls.Config{
+			// MinVersion: tls.VersionTLS10,
+			// CipherSuites: []uint16{
+			// 	// TLS 1.0 - 1.2 cipher suites.
+			// 	tls.TLS_RSA_WITH_RC4_128_SHA,
+			// 	tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA,
+			// 	tls.TLS_RSA_WITH_AES_128_CBC_SHA,
+			// 	tls.TLS_RSA_WITH_AES_256_CBC_SHA,
+			// 	tls.TLS_RSA_WITH_AES_128_CBC_SHA256,
+			// 	tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
+			// 	tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
+			// 	tls.TLS_ECDHE_ECDSA_WITH_RC4_128_SHA,
+			// 	tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA,
+			// 	tls.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA,
+			// 	tls.TLS_ECDHE_RSA_WITH_RC4_128_SHA,
+			// 	tls.TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA,
+			// 	tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA,
+			// 	tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
+			// 	tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256,
+			// 	tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256,
+			// 	tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			// 	tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			// 	tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			// 	tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			// 	tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+			// 	tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+			// 	// TLS 1.3 cipher suites.
+			// 	tls.TLS_AES_128_GCM_SHA256,
+			// 	tls.TLS_AES_256_GCM_SHA384,
+			// 	tls.TLS_CHACHA20_POLY1305_SHA256,
+			// },
 			//ServerName: httpsProxyHost, // 如果直接是域名请求，就不用配置
 			//InsecureSkipVerify: true, // 如果是签名的证书并且是域名请求，就不用配置
 		})
@@ -565,13 +617,10 @@ func (ps *ProxyServer) tcpHandle(r *tcp.ForwarderRequest) {
 
 	r.Complete(false)
 
-	host := id.LocalAddress.String()
-	if v, ok := ps.dnsCache.Get(id.LocalAddress.String()); ok {
-		host = v
-	}
+	host := ps.dnsCache.matchHost(id.LocalAddress.String())
 	c, err := ps.httpsDial("tcp", fmt.Sprintf("%s:%d", host, id.LocalPort))
 	if err != nil {
-		log.Println("httpsDial failed", err)
+		log.Println("httpsDial failed", fmt.Sprintf("%s:%d", host, id.LocalPort), err)
 		// r.Complete(true)
 		return
 	}
@@ -715,6 +764,9 @@ func GetInterfaceIndex() (uint32, uint32, error) {
 }
 
 func main() {
+	// fix golang 1.22 tls issue: https://pkg.go.dev/crypto/tls#Config https://github.com/golang/go/issues/63413
+	os.Setenv("GODEBUG", "tlsrsakex=1")
+
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 
 	ifIdx, subIfIdx, err := GetInterfaceIndex()
