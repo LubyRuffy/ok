@@ -308,7 +308,9 @@ func (ps *ProxyServer) handleDns(packet []byte) {
 			switch a.Header().Rrtype {
 			case dns.TypeCNAME:
 				responseDomain := strings.TrimSuffix(a.(*dns.CNAME).Hdr.Name, ".")
-				rawHost = responseDomain
+				if ps.config.ContainsDomain(responseDomain) {
+					rawHost = responseDomain
+				}
 			case dns.TypeA:
 				// 目前只处理ipv4
 				responseDomain := strings.TrimSuffix(a.(*dns.A).Hdr.Name, ".")

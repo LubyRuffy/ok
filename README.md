@@ -9,3 +9,7 @@ I hope for an out-of-the-box network tool that doesn't require too much complex 
 - [x] Config
     - [x] Process name
     - [x] Domain Surfix
+    - [ ] Changes will take effect automatically upon modification
+
+## TODO
+- [ ] directory refactoring
